@@ -147,6 +147,7 @@
             });
         } catch (e) {
             console.warn("Autosave failed:", e);
+            warnStorageUnavailable();
         }
     }
 
@@ -161,6 +162,7 @@
             });
         } catch (e) {
             console.warn("Reading saved progress failed:", e);
+            warnStorageUnavailable();
             return null;
         }
     }
@@ -570,9 +572,23 @@
     // reused as-is rather than re-read into memory. If that's not enough to
     // clear a wedged attempt, the failure screen offers a real page reload
     // as a fallback, since that's the more thorough (but heavier) fix.
-    const RETRY_ONLY_ON_CHROME = true; // Firefox/Safari haven't shown this bug
+    // Retry the stuck-load watchdog on Chrome (the originally-reported
+    // browser) AND on Safari/WebKit, which shows the same class of
+    // symptom -- loading screen sits there forever, no error -- on both
+    // macOS and iOS with these threaded WASM cores. Left off for Firefox
+    // and anything else we can't positively identify, since retrying a
+    // launch that was never going to get stuck just wastes time.
+    const RETRY_ON_CHROME = true;
+    const RETRY_ON_SAFARI = true;
     const MAX_LOAD_RETRIES = 3;
-    const LOAD_TIMEOUT_MS = 45000; // raise this if your ROMs/cores take longer to fetch
+
+    // Mobile devices (phones especially) commonly take longer to compile
+    // and instantiate these multi-MB threaded WASM cores than a desktop --
+    // fewer/slower cores, more thermal throttling, sometimes a cold cache.
+    // A flat 45s timeout tuned on desktop was firing retries on phones that
+    // were simply still working, not stuck -- so give mobile more rope
+    // before treating a slow load as a wedged one.
+    const LOAD_TIMEOUT_MS = isProbablyMobile() ? 75000 : 45000;
 
     function isProbablyChrome() {
         const ua = navigator.userAgent;
@@ -586,10 +602,39 @@
         return true;
     }
 
+    // iPadOS 13+ deliberately reports as a Mac (desktop-class UA) to get
+    // desktop sites, so UA sniffing alone can't tell an iPad from a Mac --
+    // touch support is what actually distinguishes them.
+    function isIOS() {
+        const ua = navigator.userAgent;
+        if (/iP(hone|od|ad)/.test(ua)) return true;
+        return navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1;
+    }
+
+    // Every browser on iOS is required to use WebKit under the hood
+    // (Chrome/Firefox/Edge for iOS are all just Safari wearing a skin), so
+    // "on iOS" and "on Safari's engine" are effectively the same condition
+    // there. On desktop we still need to exclude the other browsers whose
+    // UA strings happen to contain "Safari" too.
+    function isProbablySafari() {
+        if (isIOS()) return true;
+        const ua = navigator.userAgent;
+        if (!/Safari\//.test(ua)) return false;
+        if (/Chrome\/|Chromium\/|Edg\/|OPR\//.test(ua)) return false;
+        if (navigator.brave) return false;
+        return true;
+    }
+
+    function isProbablyMobile() {
+        return isIOS() || /Android|Mobile/.test(navigator.userAgent);
+    }
+
     function retryEnabled() {
         // No amount of retrying fixes missing cross-origin-isolation headers.
-        if (typeof window.SharedArrayBuffer !== "function") return false;
-        return !RETRY_ONLY_ON_CHROME || isProbablyChrome();
+        if (window.crossOriginIsolated !== true) return false;
+        if (isProbablyChrome()) return RETRY_ON_CHROME;
+        if (isProbablySafari()) return RETRY_ON_SAFARI;
+        return false;
     }
 
     function clearLoadWatchdog(state) {
@@ -644,9 +689,15 @@
         const hint = document.createElement("div");
         hint.style.fontSize = "0.85em";
         hint.style.color = "#999";
-        hint.textContent = isProbablyChrome()
-            ? "This looks like the known Chrome loading bug in this EmulatorJS build. Firefox tends to load these cores more reliably."
-            : "You can try again, or reload the page for a clean start.";
+        if (isProbablyChrome()) {
+            hint.textContent = "This looks like a known Chrome loading bug in this EmulatorJS build. Firefox tends to load these cores more reliably.";
+        } else if (isProbablySafari()) {
+            hint.textContent = isIOS()
+                ? "Safari on iOS can be inconsistent loading these cores. If this keeps happening, try Chrome or Firefox on iOS (they still use Safari's engine, so it may not help) or a desktop browser."
+                : "Safari can be inconsistent loading these cores. Firefox or Chrome tend to load them more reliably.";
+        } else {
+            hint.textContent = "You can try again, or reload the page for a clean start.";
+        }
 
         const btnRow = document.createElement("div");
         btnRow.style.display = "flex";
@@ -695,6 +746,7 @@
             });
         } catch (e) {
             console.warn("Clearing saved progress failed:", e);
+            warnStorageUnavailable();
         }
     }
 
@@ -939,11 +991,50 @@
         });
     }
 
-    if (typeof window.SharedArrayBuffer !== "function") {
-        setStatus(
+    if (window.crossOriginIsolated !== true) {
+        // Checking `crossOriginIsolated` directly (rather than just
+        // feature-sniffing `typeof SharedArrayBuffer`) is the correct way
+        // to detect this: some browsers -- Safari in particular has had
+        // versions of this -- can expose the SharedArrayBuffer constructor
+        // without the tab actually being cross-origin isolated, which used
+        // to let this page limp past the check and then hang silently
+        // instead of showing this message.
+        let msg =
             "This browser tab isn't cross-origin isolated, so the 3DS/PSP cores " +
-            "can't use threads and won't load. Serve this folder with the included " +
-            "server.js (it sets the required headers) and open it from that server."
-        );
+            "can't use threads and won't load. If you're running this locally, " +
+            "serve this folder with the included server.js (it sets the required " +
+            "headers) and open it from that server. If this is hosted statically " +
+            "(GitHub Pages, etc.), coi-serviceworker.js should have handled this " +
+            "via one automatic reload -- try a manual reload, and check the " +
+            "browser console for a service worker registration error if it still " +
+            "doesn't clear up.";
+        if (isIOS()) {
+            msg += " Cross-origin isolation also needs Safari 15.2+ (any browser on " +
+                "iOS, since they all use Safari's engine) and, if you're opening this " +
+                "on a phone from another computer's server.js, HTTPS -- plain http:// " +
+                "over your local network won't qualify unless it's localhost.";
+        }
+        setStatus(msg);
+    }
+
+    // Autosave/SD-card storage relies on IndexedDB. It can fail to open in
+    // Safari Private Browsing (and, more rarely, when device storage is
+    // full or restricted), in which case openDb() above already degrades
+    // gracefully -- the game still runs, it just can't save. Surface that
+    // once, since "my save vanished" is a confusing thing to notice on
+    // your own days later.
+    let storageWarningShown = false;
+    function warnStorageUnavailable() {
+        if (storageWarningShown) return;
+        storageWarningShown = true;
+        const msg = "Progress can't be saved in this browser session (common in " +
+            "Safari Private Browsing, or when storage is restricted) -- the game " +
+            "will still run, it just won't auto-resume next time.";
+        if (window.EJS_emulator && window.EJS_emulator.displayMessage) {
+            window.EJS_emulator.displayMessage("Auto-save unavailable this session (private browsing?)");
+        } else {
+            setStatus(msg);
+        }
+        console.warn(msg);
     }
 })();

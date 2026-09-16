@@ -32,7 +32,13 @@ const MIME = {
     ".png": "image/png",
     ".ico": "image/x-icon",
     ".map": "application/json; charset=utf-8",
+    ".webmanifest": "application/manifest+json; charset=utf-8",
 };
+
+// manifest.json is served with this MIME type specifically (not from the
+// extension table above, since ".json" is also used for plain data files
+// that should stay "application/json").
+const MANIFEST_MIME = "application/manifest+json; charset=utf-8";
 
 const server = http.createServer((req, res) => {
     let urlPath = decodeURIComponent(req.url.split("?")[0]);
@@ -53,13 +59,29 @@ const server = http.createServer((req, res) => {
         }
 
         const ext = path.extname(filePath).toLowerCase();
+        const contentType = urlPath === "/manifest.json"
+            ? MANIFEST_MIME
+            : (MIME[ext] || "application/octet-stream");
+
+        // data/ is a pinned, unmodified copy of the EmulatorJS engine
+        // (~20MB, mostly the wasm cores) -- it never changes on its own,
+        // so re-downloading it in full on every visit is pure waste,
+        // especially over mobile data. Everything else (our own
+        // index.html/app.js/manifest, small enough that re-fetching them
+        // is free) stays no-cache so edits show up on the next reload
+        // without needing a hard refresh.
+        const isStaticEngineAsset = urlPath.startsWith("/data/");
+        const cacheControl = isStaticEngineAsset
+            ? "public, max-age=604800" // 7 days
+            : "no-cache";
+
         res.writeHead(200, {
-            "Content-Type": MIME[ext] || "application/octet-stream",
+            "Content-Type": contentType,
             "Content-Length": stats.size,
             "Cross-Origin-Opener-Policy": "same-origin",
             "Cross-Origin-Embedder-Policy": "require-corp",
             "Cross-Origin-Resource-Policy": "same-origin",
-            "Cache-Control": "no-cache",
+            "Cache-Control": cacheControl,
         });
         fs.createReadStream(filePath).pipe(res);
     });

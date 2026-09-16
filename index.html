@@ -3,8 +3,23 @@
 <head>
     <meta charset="utf-8">
     <title>3DS / PSP Emulator</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <!-- Must run before anything else: on hosts that can't set response
+         headers themselves (GitHub Pages, etc.) this gets the page
+         cross-origin isolated via a service worker instead. No-op when
+         served locally via server.js, which already sets the headers. -->
+    <script src="coi.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#111111">
     <link rel="icon" href="data:,">
+    <link rel="manifest" href="manifest.json">
+    <!-- iOS ignores <link rel="manifest">'s display mode, so these three
+         meta tags are what actually get "Add to Home Screen" to launch
+         full-screen (no Safari chrome eating the top/bottom of a landscape
+         game) instead of opening a normal Safari tab. Harmless elsewhere. -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="3DS/PSP">
+    <link rel="apple-touch-icon" href="icons/icon-192.png">
     <style>
         html, body {
             height: 100%;
@@ -17,6 +32,20 @@
             display: flex;
             align-items: center;
             justify-content: center;
+            /* Keeps content clear of the iPhone notch / home indicator when
+               launched full-screen from the home screen (viewport-fit=cover
+               above opts into drawing under them in the first place). A
+               no-op everywhere else, since env() falls back to 0. */
+            padding: env(safe-area-inset-top) env(safe-area-inset-right)
+                     env(safe-area-inset-bottom) env(safe-area-inset-left);
+            box-sizing: border-box;
+        }
+        button {
+            /* Removes the gray flash Mobile Safari/Chrome show on tap, and
+               the ~300ms delay old mobile browsers add before a click
+               fires while they wait to see if it's a double-tap-to-zoom. */
+            -webkit-tap-highlight-color: transparent;
+            touch-action: manipulation;
         }
         #appRoot {
             display: flex;
@@ -38,6 +67,8 @@
             padding: 2em 1em;
             cursor: pointer;
             gap: 0.75em;
+            -webkit-tap-highlight-color: transparent;
+            touch-action: manipulation;
         }
         #dropzone[drag] {
             border-color: #4a9eff;
